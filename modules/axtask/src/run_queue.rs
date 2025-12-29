@@ -1,20 +1,19 @@
+#[cfg(feature = "smp")]
+use alloc::sync::Weak;
 use alloc::{collections::VecDeque, sync::Arc};
 use core::{
     future::poll_fn,
     mem::MaybeUninit,
     task::{Context, Poll},
 };
-use futures_util::task::AtomicWaker;
 
-#[cfg(feature = "smp")]
-use alloc::sync::Weak;
-
+use axhal::percpu::this_cpu_id;
 use axsched::BaseScheduler;
+use crate_interface::call_interface;
+use futures_util::task::AtomicWaker;
 use kernel_guard::BaseGuard;
 use kspin::SpinRaw;
 use lazyinit::LazyInit;
-
-use axhal::percpu::this_cpu_id;
 
 use crate::{
     AxCpuMask, AxTaskRef, Scheduler, TaskInner,
@@ -43,6 +42,64 @@ percpu_static! {
     /// Stores the weak reference to the previous task that is running on this CPU.
     #[cfg(feature = "smp")]
     PREV_TASK: Weak<crate::AxTask> = Weak::new(),
+}
+
+#[cfg(all(feature = "smp", feature = "preempt"))]
+/// Interface for send reschedule requests to remote CPUs.
+#[crate_interface::def_interface]
+pub trait RescheIf {
+    /// Send a reschedule ipi to the target CPU.
+    fn send_reschedule_ipi(cpu_id: usize);
+}
+
+/// Check if a reschedule IPI should be sent when waking up a task on a remote CPU.
+///
+/// Returns true if an IPI should be sent.
+#[cfg(feature = "smp")]
+#[inline]
+fn should_send_reschedule_ipi(target_cpu: usize, task: &AxTaskRef) -> bool {
+    let current_cpu = this_cpu_id();
+
+    // 1. Don't send IPI to self
+    if target_cpu == current_cpu {
+        return false;
+    }
+    // 2. If the target CPU is not allowed by task's cpumask, skip
+    if !task.cpumask().get(target_cpu) {
+        return false;
+    }
+    // 3. If the task is already running on target CPU, no need to resched
+    if task.on_cpu() && task.cpu_id() as usize == target_cpu {
+        return false;
+    }
+    // 4. If target CPU is idle, always reschedule
+    //
+    // NOTE:
+    // We cannot safely inspect remote CurrentTask here.
+    // But IDLE_TASK is per-cpu and stable.
+    let is_idle = unsafe {
+        IDLE_TASK
+            .remote_ref_raw(target_cpu)
+            .get()
+            .map(|idle| idle.inner().on_cpu())
+            .unwrap_or(false)
+    };
+    let should_send = is_idle || {
+        // 5. Conservative fallback:
+        // The task is woken on a remote CPU which is running some task.
+        // We don't know its priority, so request reschedule.
+        true
+    };
+
+    if should_send {
+        debug!(
+            "Task {} woken on CPU {}, sending reschedule IPI from CPU {}",
+            task.id_name(),
+            target_cpu,
+            current_cpu
+        );
+    }
+    should_send
 }
 
 /// An array of references to run queues, one for each CPU, indexed by cpu_id.
@@ -98,7 +155,6 @@ pub(crate) fn current_run_queue<G: BaseGuard>() -> CurrentRunQueueRef<'static, G
 /// ## Panics
 ///
 /// This function will panic if `cpu_mask` is empty, indicating that there are no available CPUs for task execution.
-///
 #[cfg(feature = "smp")]
 // The modulo operation is safe here because `axconfig::plat::CPU_NUM` is always greater than 1 with "smp" enabled.
 #[allow(clippy::modulo_one)]
@@ -134,7 +190,6 @@ fn select_run_queue_index(cpumask: AxCpuMask) -> usize {
 /// ## Panics
 ///
 /// This function will panic if the index is out of bounds.
-///
 #[cfg(feature = "smp")]
 #[inline]
 fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
@@ -158,7 +213,6 @@ fn get_run_queue(index: usize) -> &'static mut AxRunQueue {
 ///
 /// 1. Implement better load balancing across CPUs for more efficient task distribution.
 /// 2. Use a more generic load balancing algorithm that can be customized or replaced.
-///
 #[inline]
 pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<'static, G> {
     let irq_state = G::acquire();
@@ -259,16 +313,29 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
         // target task can not be insert into the run queue until it finishes its scheduling process.
         if self
             .inner
-            .put_task_with_state(task, TaskState::Blocked, resched)
+            .put_task_with_state(task.clone(), TaskState::Blocked, resched)
         {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
             debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
             // Note: when the task is unblocked on another CPU's run queue,
             // we just ingiore the `resched` flag.
-            if resched && cpu_id == this_cpu_id() {
-                #[cfg(feature = "preempt")]
-                crate::current().set_preempt_pending(true);
+            if resched {
+                debug!(
+                    "Requesting reschedule on CPU {} for task {}, cpu_id == this_cpu_id: {}",
+                    cpu_id,
+                    task_id_name,
+                    cpu_id == this_cpu_id()
+                );
+                if cpu_id == this_cpu_id() {
+                    #[cfg(feature = "preempt")]
+                    crate::current().set_preempt_pending(true);
+                } else {
+                    #[cfg(all(feature = "smp", feature = "preempt"))]
+                    if should_send_reschedule_ipi(cpu_id, &task) {
+                        call_interface!(RescheIf::send_reschedule_ipi(cpu_id));
+                    }
+                }
             }
         }
     }

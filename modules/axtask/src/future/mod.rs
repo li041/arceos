@@ -42,7 +42,7 @@ impl Wake for AxWaker {
     fn wake_by_ref(self: &Arc<Self>) {
         if let Some(task) = self.task.upgrade() {
             self.woke.store(true, Ordering::Release);
-            select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, false);
+            select_run_queue::<NoPreemptIrqSave>(&task).unblock_task(task, true);
         }
     }
 }

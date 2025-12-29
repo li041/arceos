@@ -53,6 +53,8 @@ cfg_if::cfg_if! {
         #[doc(cfg(feature = "multitask"))]
         pub use self::api::*;
         pub use self::api::{sleep, sleep_until, yield_now};
+        #[doc(cfg(all(feature = "multitask", feature = "smp")))]
+        pub use self::run_queue::RescheIf;
     } else {
         mod api_s;
         pub use self::api_s::{sleep, sleep_until, yield_now};

@@ -23,6 +23,8 @@ use crate::event::{Callback, MulticastCallback};
 mod event;
 mod queue;
 #[cfg(feature = "smp")]
+mod sche;
+#[cfg(feature = "smp")]
 mod tlb;
 
 static SECONDARY_CPUS_STARTED: AtomicBool = AtomicBool::new(false);

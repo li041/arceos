@@ -364,13 +364,13 @@ impl TaskInner {
     }
 
     #[inline]
-    pub(crate) const fn is_idle(&self) -> bool {
+    pub const fn is_idle(&self) -> bool {
         self.is_idle
     }
 
     #[inline]
     #[cfg(feature = "preempt")]
-    pub(crate) fn set_preempt_pending(&self, pending: bool) {
+    pub fn set_preempt_pending(&self, pending: bool) {
         self.need_resched.store(pending, Ordering::Release)
     }
 

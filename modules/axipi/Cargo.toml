@@ -12,6 +12,7 @@ documentation = "https://arceos-org.github.io/arceos/axipi/index.html"
 [features]
 default = []
 smp = []
+preempt = []
 
 [dependencies]
 axconfig.workspace = true
