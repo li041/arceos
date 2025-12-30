@@ -16,7 +16,7 @@ use kspin::SpinRaw;
 use lazyinit::LazyInit;
 
 use crate::{
-    AxCpuMask, AxTaskRef, Scheduler, TaskInner,
+    AxCpuMask, AxTaskRef, Scheduler, TaskInner, current,
     future::block_on,
     task::{CurrentTask, TaskState},
 };
@@ -318,16 +318,15 @@ impl<G: BaseGuard> AxRunQueueRef<'_, G> {
             // Since now, the task to be unblocked is in the `Ready` state.
             let cpu_id = self.inner.cpu_id;
             debug!("task unblock: {task_id_name} on run_queue {cpu_id}");
-            // Note: when the task is unblocked on another CPU's run queue,
-            // we just ingiore the `resched` flag.
+            // TODO: priority
             if resched {
                 debug!(
-                    "Requesting reschedule on CPU {} for task {}, cpu_id == this_cpu_id: {}",
+                    "Requesting reschedule on CPU {} for task {}, is_remote: {}",
                     cpu_id,
                     task_id_name,
                     cpu_id == this_cpu_id()
                 );
-                if cpu_id == this_cpu_id() {
+                if cpu_id == this_cpu_id() && current().is_idle() {
                     #[cfg(feature = "preempt")]
                     crate::current().set_preempt_pending(true);
                 } else {
